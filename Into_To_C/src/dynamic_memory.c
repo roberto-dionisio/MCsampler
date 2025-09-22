@@ -6,7 +6,7 @@ int main(void)
     {
     int *vec;
     int **matrix;
-    long int r, length=100;
+    long int r, length=100, length2=100;
 
     // allocate the vector. If length is too large this will fail in execution
     vec=(int *)malloc((unsigned long int)(length)*sizeof(int));
@@ -54,7 +54,7 @@ int main(void)
     //---------------------------
 
     // allocate the matrix
-    matrix=(int **)malloc((unsigned long int)(length)*sizeof(int *));
+    matrix=(int **)malloc((unsigned long int)(length2)*sizeof(int *));
     if(matrix == NULL)
       {
       fprintf(stderr, "Allocation problem at (%s, %d)\n", __FILE__, __LINE__);
@@ -62,9 +62,9 @@ int main(void)
       }
     else
       {
-      for(r=0; r<length; r++)
+      for(r=0; r<length2; r++)
          {
-         matrix[r]=(int *)malloc((unsigned long int)(length)*sizeof(int));
+         matrix[r]=(int *)malloc((unsigned long int)(length2)*sizeof(int));
          if(matrix[r] == NULL)
            {
            fprintf(stderr, "Allocation problem at (%s, %d)\n", __FILE__, __LINE__);
@@ -77,7 +77,7 @@ int main(void)
     matrix[0][0]=1;
 
     // free the memory of the matrix
-    for(r=0; r<length; r++)
+    for(r=0; r<length2; r++)
        {
        free(matrix[r]);
        }
