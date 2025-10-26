@@ -4,6 +4,7 @@
 #include<stdlib.h>
 #include<string.h>
 #include<time.h>
+#include<sys/time.h>
 
 #include"../include/geometry_st.h"
 #include"../include/random.h"
@@ -15,6 +16,12 @@
 
 #define STDIM 2  // space-time dimensionality
 #define STRING_LENGTH 50
+
+static inline double wall_time_sec(void) {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return (double)tv.tv_sec + (double)tv.tv_usec * 1e-6;
+}
 
 void staple(double complex ** restrict lattice, 
             long int const * const restrict nnp,
@@ -202,6 +209,140 @@ double topch(double complex ** restrict lattice,
   #endif
   }
 
+double compute_hamiltonian(double complex ** restrict lattice,
+                           double *momentum,
+                           long int const * const restrict nnp,
+                           long int stvol,
+                           double beta)
+{
+    double kinetic_energy = 0.0;
+    double potential_energy = 0.0;
+
+    for (long int r = 0; r < stvol; r++) {
+        for (int i = 0; i < STDIM; i++) {
+            kinetic_energy += 0.5 * momentum[dirgeo(r, i, stvol)] * momentum[dirgeo(r, i, stvol)];
+        }
+    }
+
+    double nplaq_per_site = 0.5 * (double)STDIM * (double)(STDIM - 1);
+    double total_plaquettes = nplaq_per_site * (double)stvol;
+    potential_energy = -beta * plaquette(lattice, nnp, stvol)* total_plaquettes;
+
+    return kinetic_energy + potential_energy;
+}
+
+void leapfrog(double complex ** restrict lattice,
+              double *momentum,
+              long int const * const restrict nnp,
+              long int const * const restrict nnm,
+              long int stvol,
+              double beta,
+              double epsilon,
+              int nsteps)
+{
+    double complex staple_val;
+    double force;
+
+    // Half-step update for momenta
+    for (long int r = 0; r < stvol; r++) {
+        for (int i = 0; i < STDIM; i++) {
+            staple(lattice, nnp, nnm, r, i, stvol, &staple_val);
+            force = -beta * cimag(lattice[r][i] * staple_val);
+            momentum[dirgeo(r, i, stvol)] += 0.5 * epsilon * force;
+        }
+    }
+
+    // Full-step update for lattice
+    for (int step = 0; step < nsteps; step++) {
+        for (long int r = 0; r < stvol; r++) {
+            for (int i = 0; i < STDIM; i++) {
+                lattice[r][i] *= cexp(I * epsilon * momentum[dirgeo(r, i, stvol)]);
+            }
+        }
+
+        // Full-step update for momenta (except the last step)
+        if (step < nsteps - 1) {
+            for (long int r = 0; r < stvol; r++) {
+                for (int i = 0; i < STDIM; i++) {
+                    staple(lattice, nnp, nnm, r, i, stvol, &staple_val);
+                    force = -beta * cimag(lattice[r][i] * staple_val);
+                    momentum[dirgeo(r, i, stvol)] += epsilon * force;
+                }
+            }
+        }
+    }
+
+    // Final half-step update for momenta
+    for (long int r = 0; r < stvol; r++) {
+        for (int i = 0; i < STDIM; i++) {
+            staple(lattice, nnp, nnm, r, i, stvol, &staple_val);
+            force = -beta * cimag(lattice[r][i] * (staple_val));
+            momentum[dirgeo(r, i, stvol)] += 0.5 * epsilon * force;
+        }
+    }
+}
+
+
+void hmc(double complex ** restrict lattice,
+         long int const * const restrict nnp,
+         long int const * const restrict nnm,
+         long int stvol,
+         double beta,
+         double epsilon,
+         int nsteps)
+{
+    double *momentum = (double *)malloc((unsigned long int)(STDIM * stvol) * sizeof(double));
+    if (momentum == NULL) {
+        fprintf(stderr, "Allocation problem for momenta (%s, %d)\n", __FILE__, __LINE__);
+        exit(EXIT_FAILURE);
+    }
+
+    double complex **lattice_backup = (double complex **)malloc((unsigned long int)(stvol) * sizeof(double complex *));
+    if (lattice_backup == NULL) {
+        fprintf(stderr, "Allocation problem for lattice backup (%s, %d)\n", __FILE__, __LINE__);
+        exit(EXIT_FAILURE);
+    }
+    for (long int r = 0; r < stvol; r++) {
+        lattice_backup[r] = (double complex *)malloc((unsigned long int)(STDIM) * sizeof(double complex));
+        if (lattice_backup[r] == NULL) {
+            fprintf(stderr, "Allocation problem for lattice backup (%s, %d)\n", __FILE__, __LINE__);
+            exit(EXIT_FAILURE);
+        }
+        memcpy(lattice_backup[r], lattice[r], STDIM * sizeof(double complex));
+    }
+
+    for (long int r = 0; r < stvol; r++) {
+        for (int i = 0; i < STDIM; i++) {
+            double u = myrand();
+            if (u < 1e-12) u = 1e-12;
+            momentum[dirgeo(r, i, stvol)] = sqrt(-2.0 * log(u)) * cos(2.0 * M_PI * myrand());
+        }
+    }
+
+    double initial_hamiltonian = compute_hamiltonian(lattice, momentum, nnp,stvol, beta);
+
+    // leapfrog integration
+    //printf("Debug Inside HMC, before leapfrog\n");
+    leapfrog(lattice, momentum, nnp, nnm, stvol, beta, epsilon, nsteps);
+    //printf("Debug Inside HMC, after leapfrog\n");
+
+    double final_hamiltonian = compute_hamiltonian(lattice, momentum, nnp,stvol, beta);
+
+    if (myrand() >= exp(initial_hamiltonian - final_hamiltonian)) {
+        // Reject: restore the original lattice
+        for (long int r = 0; r < stvol; r++) {
+            memcpy(lattice[r], lattice_backup[r], STDIM * sizeof(double complex));
+        }
+    }
+
+    for (long int r = 0; r < stvol; r++) {
+        free(lattice_backup[r]);
+    }
+    free(lattice_backup);
+    free(momentum);
+}
+
+
 
 // main
 int main(int argc, char **argv)
@@ -222,11 +363,13 @@ int main(int argc, char **argv)
    
    const unsigned long int seed1=(unsigned long int) time(NULL);
    const unsigned long int seed2=seed1+127;
-
-   if(argc != 6)
+   int algorithm = 0; // 0 default for Metro+OR std, 1 now do just OR as placeholder but i want to implement HB, 2 for HMC
+   if (argc == 7) algorithm = atoi(argv[6]);
+    
+   if(argc != 7)
      {
      fprintf(stdout, "How to use this program:\n");
-     fprintf(stdout, "  %s Nt Ns beta sample datafile\n\n", argv[0]);
+     fprintf(stdout, "  %s Nt Ns beta sample datafile alg\n\n", argv[0]);
      fprintf(stdout, "  Nt = temporal size of the lattice\n");
      fprintf(stdout, "  Ns = spatial size of the lattice (space-time dimension defined by macro STDIM)\n");
      fprintf(stdout, "  beta = coupling\n");
@@ -319,56 +462,80 @@ int main(int argc, char **argv)
 
    acc=0.0;
    count=0;
-   for(iter=0; iter<sample; iter++)
-      {
-      rand=myrand(); 
+   int prog = 0;
 
-      if(rand<1.0/(double)overrelax)
-        {
-        count++;
-        // metropolis
-        for(r=0; r<stvolume; r++)
-           {
-           for(i=0; i<STDIM; i++)
-              {
-              acc += metropolis(lattice, nnp, nnm, r, i, epsilon, beta, stvolume);
-              }
-           }
-         }
-      else
-        {
-        // overrelaxation
-        for(r=0; r<stvolume; r++)
-           {
-           for(i=0; i<STDIM; i++)
-              {
-              overrelaxation(lattice, nnp, nnm, r, i, stvolume);
-              }
-           }
-        } 
+  // time stats for prog to new prog
+   double t_start = wall_time_sec();
+   double t_last_prog = t_start;
+   long int it_last_prog = 0;
 
-      // reunitarize
-      if(iter%unitarizeevery==0)
-        {
-        for(r=0; r<stvolume; r++)
-           {
-           for(i=0; i<STDIM; i++)
-              {
-              lattice[r][i]/=cabs(lattice[r][i]);
-              }
+   for (iter = 0; iter < sample; iter++) {
+        int new_prog = (int)((double)(iter + 1) / (double)sample * 100.0);
+        if (new_prog > prog) {
+            prog = new_prog;
+            double now = wall_time_sec();
+            long int iters_since = (iter + 1) - it_last_prog;
+            double dt = now - t_last_prog;
+            double per_it = iters_since > 0 ? dt / (double)iters_since : 0.0;
+            double elapsed = now - t_start;
+            double eta = ((double)sample - (iter + 1)) * per_it;
+
+            printf("Progress: %d%% | %ld iters in %.3fs (%.6fs/iter) | elapsed %.1fs | ETA %.1fs\n", prog, iters_since, dt, per_it, elapsed, eta);
+            fflush(stdout);
+
+            t_last_prog = now;
+            it_last_prog = iter + 1;
+        }
+    if (algorithm == 0) {
+        // Original behavior: Metropolis and Overrelaxation
+        rand = myrand();
+        if (rand < 1.0 / (double)overrelax) {
+            count++;
+            // Metropolis
+            for (r = 0; r < stvolume; r++) {
+                for (i = 0; i < STDIM; i++) {
+                    acc += metropolis(lattice, nnp, nnm, r, i, epsilon, beta, stvolume);
+                }
+            }
+        } else {
+            // Overrelaxation
+            for (r = 0; r < stvolume; r++) {
+                for (i = 0; i < STDIM; i++) {
+                    overrelaxation(lattice, nnp, nnm, r, i, stvolume);
+                }
             }
         }
+    } else if (algorithm == 1) {
+        // Overrelaxation only
+        for (r = 0; r < stvolume; r++) {
+            for (i = 0; i < STDIM; i++) {
+                overrelaxation(lattice, nnp, nnm, r, i, stvolume);
+            }
+        }
+    } else if (algorithm == 2) {
+        // HMC
+        //printf("Debug: Before HMC call\n");
+        hmc(lattice, nnp, nnm, stvolume, beta, 0.01, 20); // 10 leapfrog steps
+        //printf("Debug: After HMC call\n");
+      }
 
-      // perform measures
-      if(iter%measevery==0)
-        {
-        // perform measures
-        plaq=plaquette(lattice, nnp, stvolume);
-        Q=topch(lattice, nnp, stvolume);
+    // Reunitarize
+    if (iter % unitarizeevery == 0) {
+        for (r = 0; r < stvolume; r++) {
+            for (i = 0; i < STDIM; i++) {
+                lattice[r][i] /= cabs(lattice[r][i]);
+            }
+        }
+    }
+
+    // Perform measurements
+    if (iter % measevery == 0) {
+        plaq = plaquette(lattice, nnp, stvolume);
+        Q = topch(lattice, nnp, stvolume);
 
         fprintf(fp, "%.12f %.12f\n", plaq, Q);
-        }
-      }
+    }
+  }
 
    printf("Acceptance rate %f\n", (double)acc/(double)count/(double)stvolume/(double)STDIM);
 
